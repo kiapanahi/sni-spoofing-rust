@@ -1,0 +1,9 @@
+{
+  "listeners": [
+    {
+      "listen": "0.0.0.0:40443",
+      "connect": "172.67.139.236:443",
+      "fake_sni": "security.vercel.com"
+    }
+  ]
+}
