@@ -8,7 +8,8 @@ use super::RawBackend;
 use crate::error::SnifferError;
 
 pub struct WinDivertBackend {
-    handle: WinDivert<NetworkLayer>,
+    sniff_handle: WinDivert<NetworkLayer>,
+    inject_handle: WinDivert<NetworkLayer>,
     recv_buf: Vec<u8>,
 }
 
@@ -34,17 +35,26 @@ impl WinDivertBackend {
             }
         }
         let filter_str = format!("tcp and ({})", parts.join(" or "));
-        info!(filter = %filter_str, "opening WinDivert handle");
+        info!(filter = %filter_str, "opening WinDivert handles");
 
-        let handle = WinDivert::network(
-            filter_str,
+        let sniff_flags = WinDivertFlags::new().set_sniff().set_recv_only();
+        let sniff_handle = WinDivert::network(
+            &filter_str,
             0i16,
-            WinDivertFlags::default(),
-        ).map_err(|e| SnifferError::SocketOpen(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+            sniff_flags,
+        ).map_err(|e| SnifferError::SocketOpen(io::Error::new(io::ErrorKind::Other, format!("sniff handle: {}", e))))?;
 
-        info!("WinDivert handle opened");
+        let inject_flags = WinDivertFlags::new().set_send_only();
+        let inject_handle = WinDivert::network(
+            "false",
+            0i16,
+            inject_flags,
+        ).map_err(|e| SnifferError::SocketOpen(io::Error::new(io::ErrorKind::Other, format!("inject handle: {}", e))))?;
+
+        info!("WinDivert handles opened (sniff + inject)");
         Ok(WinDivertBackend {
-            handle,
+            sniff_handle,
+            inject_handle,
             recv_buf: vec![0u8; 65536],
         })
     }
@@ -56,16 +66,12 @@ impl RawBackend for WinDivertBackend {
     fn skip_checksum_on_send(&self) -> bool { false }
 
     fn recv_frame(&mut self, buf: &mut [u8]) -> Result<usize, SnifferError> {
-        let packet = self.handle.recv(&mut self.recv_buf)
+        let packet = self.sniff_handle.recv(&mut self.recv_buf)
             .map_err(|e| SnifferError::Recv(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
 
         let data = &packet.data;
         let len = data.len().min(buf.len());
         buf[..len].copy_from_slice(&data[..len]);
-
-        self.handle.send(&packet)
-            .map_err(|e| SnifferError::Recv(io::Error::new(io::ErrorKind::Other, format!("re-inject: {}", e))))?;
-
         Ok(len)
     }
 
@@ -73,7 +79,7 @@ impl RawBackend for WinDivertBackend {
         let mut packet = unsafe { WinDivertPacket::<NetworkLayer>::new(frame.to_vec()) };
         packet.address.set_outbound(true);
         let _ = packet.recalculate_checksums(Default::default());
-        self.handle.send(&packet)
+        self.inject_handle.send(&packet)
             .map_err(|e| SnifferError::Inject(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
         Ok(())
     }
