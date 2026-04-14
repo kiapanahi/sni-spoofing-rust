@@ -1,5 +1,8 @@
 use std::io;
 use std::net::SocketAddr;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::Duration;
 
 use tracing::info;
 use windivert::prelude::*;
@@ -8,9 +11,8 @@ use super::RawBackend;
 use crate::error::SnifferError;
 
 pub struct WinDivertBackend {
-    sniff_handle: WinDivert<NetworkLayer>,
     inject_handle: WinDivert<NetworkLayer>,
-    recv_buf: Vec<u8>,
+    packet_rx: Receiver<Vec<u8>>,
 }
 
 impl WinDivertBackend {
@@ -51,11 +53,25 @@ impl WinDivertBackend {
             inject_flags,
         ).map_err(|e| SnifferError::SocketOpen(io::Error::new(io::ErrorKind::Other, format!("inject handle: {}", e))))?;
 
+        let (packet_tx, packet_rx) = mpsc::sync_channel(128);
+        thread::spawn(move || {
+            let mut recv_buf = vec![0u8; 65536];
+            loop {
+                let packet = match sniff_handle.recv(&mut recv_buf) {
+                    Ok(packet) => packet,
+                    Err(_) => return,
+                };
+
+                if packet_tx.send(packet.data.to_vec()).is_err() {
+                    return;
+                }
+            }
+        });
+
         info!("WinDivert handles opened (sniff + inject)");
         Ok(WinDivertBackend {
-            sniff_handle,
             inject_handle,
-            recv_buf: vec![0u8; 65536],
+            packet_rx,
         })
     }
 }
@@ -66,10 +82,16 @@ impl RawBackend for WinDivertBackend {
     fn skip_checksum_on_send(&self) -> bool { false }
 
     fn recv_frame(&mut self, buf: &mut [u8]) -> Result<usize, SnifferError> {
-        let packet = self.sniff_handle.recv(&mut self.recv_buf)
-            .map_err(|e| SnifferError::Recv(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+        let data = match self.packet_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(packet) => packet,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(SnifferError::Recv(io::Error::new(io::ErrorKind::TimedOut, "recv timeout")));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(SnifferError::Recv(io::Error::new(io::ErrorKind::BrokenPipe, "sniff thread stopped")));
+            }
+        };
 
-        let data = &packet.data;
         let len = data.len().min(buf.len());
         buf[..len].copy_from_slice(&data[..len]);
         Ok(len)

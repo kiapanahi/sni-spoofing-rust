@@ -25,7 +25,7 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: sni-spoof-rs-macos-arm64
-          - target: x86_64-pc-windows-msvc
+          - target: x86_64-pc-windows-gnu
             os: windows-latest
             name: sni-spoof-rs-windows-amd64
 
@@ -38,6 +38,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install MinGW toolchain
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+
       - name: Install cross-compilation tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -45,6 +54,15 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Configure GNU linker
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        shell: pwsh
+        run: |
+          $gcc = "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin\gcc.exe" -replace '\\','/'
+          New-Item -ItemType Directory -Force -Path $env:USERPROFILE/.cargo | Out-Null
+          Add-Content -Path $env:USERPROFILE/.cargo/config.toml -Value '[target.x86_64-pc-windows-gnu]'
+          Add-Content -Path $env:USERPROFILE/.cargo/config.toml -Value "linker = '$gcc'"
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -60,18 +78,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist/sni-spoof-rs-windows-amd64
-          Copy-Item target/${{ matrix.target }}/release/sni-spoof-rs.exe dist/sni-spoof-rs-windows-amd64/
+          New-Item -ItemType Directory -Force -Path dist/${{ matrix.name }}
+          Copy-Item target/${{ matrix.target }}/release/sni-spoof-rs.exe dist/${{ matrix.name }}/
           $sysFile = Get-ChildItem -Recurse -Path target -Filter "WinDivert64.sys" | Select-Object -First 1
-          if ($sysFile) {
-            Copy-Item $sysFile.FullName dist/sni-spoof-rs-windows-amd64/
+          $dllFile = Get-ChildItem -Recurse -Path target -Filter "WinDivert.dll" | Select-Object -First 1
+          if ($sysFile -and $dllFile) {
+            Copy-Item $sysFile.FullName dist/${{ matrix.name }}/
+            Copy-Item $dllFile.FullName dist/${{ matrix.name }}/
           } else {
-            Write-Host "WinDivert64.sys not found in build output, downloading from WinDivert release"
+            Write-Host "WinDivert files not found in build output, downloading from WinDivert release"
             Invoke-WebRequest -Uri "https://github.com/basil00/Divert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip" -OutFile windivert.zip
             Expand-Archive windivert.zip -DestinationPath windivert-extracted
-            Copy-Item windivert-extracted/WinDivert-2.2.2-A/x64/WinDivert64.sys dist/sni-spoof-rs-windows-amd64/
+            Copy-Item windivert-extracted/WinDivert-2.2.2-A/x64/WinDivert.dll dist/${{ matrix.name }}/
+            Copy-Item windivert-extracted/WinDivert-2.2.2-A/x64/WinDivert64.sys dist/${{ matrix.name }}/
           }
-          Compress-Archive -Path dist/sni-spoof-rs-windows-amd64/* -DestinationPath dist/${{ matrix.name }}.zip
+          Compress-Archive -Path dist/${{ matrix.name }}/* -DestinationPath dist/${{ matrix.name }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
