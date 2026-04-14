@@ -4,6 +4,8 @@ Rust implementation of [patterniha's SNI-Spoofing](https://github.com/patterniha
 
 A TCP forwarder that injects a fake TLS ClientHello with an intentionally wrong TCP sequence number right after the 3-way handshake. Stateful DPI reads the fake SNI and whitelists the flow. The real server drops the packet (out-of-window seq). Real traffic then passes through undetected.
 
+**[English Guide](#setup-guide)** | **[Persian Guide](#%D8%B1%D8%A7%D9%87%D9%86%D9%85%D8%A7%DB%8C-%D9%81%D8%A7%D8%B1%D8%B3%DB%8C)**
+
 ## Platforms
 
 - **Linux** -- AF_PACKET raw sockets. Requires root or `CAP_NET_RAW`.
@@ -18,7 +20,67 @@ cargo build --release
 
 Pre-built binaries for Linux (amd64/arm64), macOS (amd64/arm64), and Windows (amd64) are available on the [releases](https://github.com/therealaleph/sni-spoofing-rust/releases) page.
 
-## Usage
+## Setup Guide
+
+This tool works with VLESS/VMess configs that go through Cloudflare (CDN-based configs). Your server must be behind Cloudflare.
+
+### Step 1: Find your server's Cloudflare IP
+
+Your v2ray/xray config has a server address (a domain like `myserver.example.com`). Resolve it to get the IP:
+
+```
+nslookup myserver.example.com
+```
+
+You should get a Cloudflare IP (usually starts with `104.`, `172.67.`, `141.101.`, etc).
+
+### Step 2: Create config.json
+
+```json
+{
+  "listeners": [
+    {
+      "listen": "0.0.0.0:40443",
+      "connect": "CLOUDFLARE_IP:443",
+      "fake_sni": "security.vercel.com"
+    }
+  ]
+}
+```
+
+Replace `CLOUDFLARE_IP` with the IP from step 1. The `fake_sni` can be any domain that is allowed by your DPI (a well-known site behind Cloudflare works best).
+
+| Field | Description |
+|---|---|
+| `listen` | Local address and port to listen on |
+| `connect` | Cloudflare IP and port (must be an IP, not a hostname) |
+| `fake_sni` | SNI for the fake ClientHello (max 219 bytes) |
+
+Multiple listeners are supported -- each maps to one upstream.
+
+### Step 3: Edit your v2ray/xray config
+
+In your VLESS/VMess client config, change:
+
+- **Address**: from `myserver.example.com` (or its IP) to `127.0.0.1`
+- **Port**: to the `listen` port from config.json (e.g. `40443`)
+- **Keep everything else the same** (SNI, host, path, UUID, etc.)
+
+Example -- if your original config has:
+```
+address: myserver.example.com
+port: 443
+```
+
+Change it to:
+```
+address: 127.0.0.1
+port: 40443
+```
+
+The tool sits between your v2ray client and the server. Your client connects to the tool, the tool handles the DPI bypass, and forwards traffic to Cloudflare.
+
+### Step 4: Run
 
 ```
 # Linux/macOS
@@ -28,31 +90,7 @@ sudo ./sni-spoof-rs config.json
 sni-spoof-rs.exe config.json
 ```
 
-### config.json
-
-```json
-{
-  "listeners": [
-    {
-      "listen": "0.0.0.0:40443",
-      "connect": "104.18.4.130:443",
-      "fake_sni": "security.vercel.com"
-    }
-  ]
-}
-```
-
-| Field | Description |
-|---|---|
-| `listen` | Local address to accept connections on |
-| `connect` | Upstream server IP and port (must be an IP, not a hostname) |
-| `fake_sni` | SNI to put in the fake ClientHello (max 219 bytes) |
-
-Multiple listeners are supported -- each maps to one upstream.
-
-### With xray/v2ray
-
-Point your VLESS/VMess client at `127.0.0.1:<listen_port>` instead of the real server. The tool handles the DPI bypass transparently. Your client's real TLS handshake passes through untouched after the fake injection.
+Then connect with your v2ray/xray client as usual.
 
 ### Logging
 
@@ -74,6 +112,74 @@ sudo RUST_LOG=debug ./sni-spoof-rs config.json
 5. The server drops the fake packet (out-of-window).
 6. Tool waits for the server's ACK with `ack == ISN + 1` confirming the fake was ignored.
 7. Bidirectional relay starts. The real TLS handshake and all subsequent traffic flow normally.
+
+---
+
+## راهنمای فارسی
+
+این ابزار با کانفیگ‌های VLESS/VMess که از Cloudflare عبور می‌کنند کار می‌کند. سرور شما باید پشت Cloudflare باشد.
+
+### مرحله ۱: پیدا کردن IP کلادفلر سرور
+
+آدرس سرور در کانفیگ v2ray شما یک دامنه است (مثل `myserver.example.com`). IP آن را پیدا کنید:
+
+```
+nslookup myserver.example.com
+```
+
+باید یک IP کلادفلر بگیرید (معمولا با `104.`، `172.67.`، `141.101.` شروع می‌شود).
+
+### مرحله ۲: ساخت config.json
+
+```json
+{
+  "listeners": [
+    {
+      "listen": "0.0.0.0:40443",
+      "connect": "IP_CLOUDFLARE:443",
+      "fake_sni": "security.vercel.com"
+    }
+  ]
+}
+```
+
+به جای `IP_CLOUDFLARE` آی‌پی مرحله ۱ را بگذارید. مقدار `fake_sni` می‌تواند هر دامنه‌ای باشد که فیلتر نیست (یک سایت معروف پشت کلادفلر بهتر جواب می‌دهد).
+
+### مرحله ۳: تغییر کانفیگ v2ray/xray
+
+در کانفیگ VLESS/VMess خود این تغییرات را بدهید:
+
+- **آدرس (address)**: عوض کنید به `127.0.0.1`
+- **پورت (port)**: عوض کنید به پورت listen از config.json (مثلا `40443`)
+- **بقیه تنظیمات را دست نزنید** (SNI، host، path، UUID و غیره)
+
+مثال -- اگر کانفیگ اصلی شما اینطوری است:
+```
+address: myserver.example.com
+port: 443
+```
+
+تغییر دهید به:
+```
+address: 127.0.0.1
+port: 40443
+```
+
+### مرحله ۴: اجرا
+
+```
+# لینوکس/مک
+sudo ./sni-spoof-rs config.json
+
+# ویندوز (با دسترسی Administrator اجرا کنید)
+sni-spoof-rs.exe config.json
+```
+
+بعد از اجرا، کلاینت v2ray/xray خود را مثل همیشه وصل کنید.
+
+### دانلود
+
+فایل‌های اجرایی آماده برای لینوکس، مک و ویندوز از صفحه [releases](https://github.com/therealaleph/sni-spoofing-rust/releases) قابل دانلود هستند.
 
 ## License
 
